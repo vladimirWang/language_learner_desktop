@@ -82,6 +82,10 @@ export const startParse = (req: ParseRequest) => invoke<void>('start_parse', { r
 export const uploadMaterial = (req: UploadMaterialRequest) =>
   invoke<UploadMaterialResult>('upload_material', { req })
 
+/** 删除一条本地解析记录（不动 Downloads 里的 zip）。 */
+export const deleteMaterial = (examId: string) =>
+  invoke<void>('delete_material', { examId })
+
 export const getDefaultBuilderRoot = () => invoke<string>('default_builder_root')
 
 export const listMaterials = () => invoke<MaterialRecord[]>('list_materials')

@@ -1,9 +1,20 @@
-import { CloudUploadOutlined, ReloadOutlined } from '@ant-design/icons'
-import { App as AntApp, Button, Card, Space, Table, Tag, Tooltip, Typography } from 'antd'
+import { CloudUploadOutlined, DeleteOutlined, ReloadOutlined } from '@ant-design/icons'
+import {
+  App as AntApp,
+  Button,
+  Card,
+  Popconfirm,
+  Space,
+  Table,
+  Tag,
+  Tooltip,
+  Typography,
+} from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import { useCallback, useEffect, useState } from 'react'
 import { loadSettings } from '../settings'
 import {
+  deleteMaterial,
   listMaterials,
   onParseDone,
   onParseStage,
@@ -28,6 +39,7 @@ export default function MaterialsPage() {
   const [rows, setRows] = useState<MaterialRecord[]>([])
   const [loading, setLoading] = useState(false)
   const [uploadingId, setUploadingId] = useState<string | null>(null)
+  const [deletingId, setDeletingId] = useState<string | null>(null)
 
   const load = useCallback(
     async (showLoading = true) => {
@@ -108,6 +120,21 @@ export default function MaterialsPage() {
     }
   }
 
+  const handleDelete = async (row: MaterialRecord) => {
+    setDeletingId(row.examId)
+    try {
+      await deleteMaterial(row.examId)
+      message.success(`已删除：${row.examId}`)
+    } catch (error) {
+      message.error(
+        '删除失败：' + (error instanceof Error ? error.message : String(error)),
+      )
+    } finally {
+      setDeletingId(null)
+      void load(false)
+    }
+  }
+
   const columns: ColumnsType<MaterialRecord> = [
     {
       title: '状态',
@@ -182,23 +209,46 @@ export default function MaterialsPage() {
     },
     {
       title: '操作',
-      width: 96,
+      width: 150,
       fixed: 'right',
       render: (_, row) => {
-        if (!row.zipPath) return '-'
-        if (row.status === 'uploaded') {
-          return <Typography.Text type="secondary">已上传</Typography.Text>
-        }
+        const busy = row.status === 'parsing' || row.status === 'uploading'
         return (
-          <Button
-            size="small"
-            icon={<CloudUploadOutlined />}
-            loading={uploadingId === row.examId}
-            disabled={row.status === 'parsing' || uploadingId !== null}
-            onClick={() => void handleUpload(row)}
-          >
-            上传
-          </Button>
+          <Space size={4}>
+            {row.zipPath && row.status !== 'uploaded' ? (
+              <Button
+                size="small"
+                icon={<CloudUploadOutlined />}
+                loading={uploadingId === row.examId}
+                disabled={row.status === 'parsing' || uploadingId !== null}
+                onClick={() => void handleUpload(row)}
+              >
+                上传
+              </Button>
+            ) : row.status === 'uploaded' ? (
+              <Typography.Text type="secondary">已上传</Typography.Text>
+            ) : null}
+            <Popconfirm
+              title="删除这条解析记录？"
+              description="只删除本地记录，Downloads 中的 zip 会保留。"
+              okText="删除"
+              cancelText="取消"
+              okButtonProps={{ danger: true }}
+              disabled={busy}
+              onConfirm={() => void handleDelete(row)}
+            >
+              <Button
+                size="small"
+                danger
+                type="text"
+                icon={<DeleteOutlined />}
+                loading={deletingId === row.examId}
+                disabled={busy}
+              >
+                删除
+              </Button>
+            </Popconfirm>
+          </Space>
         )
       },
     },

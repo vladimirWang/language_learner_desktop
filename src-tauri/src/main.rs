@@ -550,11 +550,56 @@ async fn upload_material(app: tauri::AppHandle, req: UploadRequest) -> Result<Va
         .map_err(|err| format!("上传线程异常：{err}"))?
 }
 
+/// 删除一条本地解析记录。进行中的任务不允许删除，避免后台线程回写。
+/// 只删记录，不动 Downloads 里的 zip。
+#[tauri::command]
+fn delete_material(app: tauri::AppHandle, exam_id: String) -> Result<(), String> {
+    let conn = open_db(&app)?;
+    let status: Option<String> = conn
+        .query_row(
+            "SELECT status FROM listening_materials WHERE exam_id = ?1",
+            params![&exam_id],
+            |row| row.get(0),
+        )
+        .ok();
+    if matches!(status.as_deref(), Some("parsing") | Some("uploading")) {
+        return Err("任务进行中，不能删除".into());
+    }
+    conn.execute(
+        "DELETE FROM listening_materials WHERE exam_id = ?1",
+        params![&exam_id],
+    )
+    .map_err(|err| format!("删除本地记录失败：{err}"))?;
+    Ok(())
+}
+
+/// 应用启动时把上次异常退出遗留的“解析中/上传中”记录标记为失败，
+/// 否则这些记录会一直停在进行中，无法删除或重试。
+fn reset_stale_tasks(app: &tauri::AppHandle) {
+    if let Ok(conn) = open_db(app) {
+        let _ = conn.execute(
+            "UPDATE listening_materials SET
+                 status = 'failed',
+                 stage = 'failed',
+                 stage_message = '应用已退出，任务未完成',
+                 error = '应用已退出，任务未完成',
+                 updated_at = datetime('now','localtime')
+             WHERE status IN ('parsing', 'uploading')",
+            [],
+        );
+    }
+}
+
 fn main() {
     tauri::Builder::default()
+        .setup(|app| {
+            reset_stale_tasks(app.handle());
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             start_parse,
             upload_material,
+            delete_material,
             default_builder_root,
             list_materials
         ])
