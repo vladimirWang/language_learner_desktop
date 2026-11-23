@@ -1,11 +1,19 @@
-import { ReloadOutlined } from '@ant-design/icons'
+import { CloudUploadOutlined, ReloadOutlined } from '@ant-design/icons'
 import { App as AntApp, Button, Card, Space, Table, Tag, Tooltip, Typography } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import { useCallback, useEffect, useState } from 'react'
-import { listMaterials, onParseDone, onParseStage, type MaterialRecord } from '../tauri'
+import { loadSettings } from '../settings'
+import {
+  listMaterials,
+  onParseDone,
+  onParseStage,
+  uploadMaterial,
+  type MaterialRecord,
+} from '../tauri'
 
 const STATUS_META: Record<string, { color: string; text: string }> = {
   parsing: { color: 'processing', text: '解析中' },
+  uploading: { color: 'processing', text: '上传中' },
   uploaded: { color: 'success', text: '已上传' },
   failed: { color: 'error', text: '失败' },
 }
@@ -19,6 +27,7 @@ export default function MaterialsPage() {
   const { message } = AntApp.useApp()
   const [rows, setRows] = useState<MaterialRecord[]>([])
   const [loading, setLoading] = useState(false)
+  const [uploadingId, setUploadingId] = useState<string | null>(null)
 
   const load = useCallback(
     async (showLoading = true) => {
@@ -62,6 +71,42 @@ export default function MaterialsPage() {
       unlisteners.forEach((unlisten) => unlisten())
     }
   }, [load])
+
+  const handleUpload = async (row: MaterialRecord) => {
+    if (!row.zipPath) {
+      message.error('这条记录没有可上传的 zip')
+      return
+    }
+    const settings = loadSettings()
+    if (!settings.server.trim()) {
+      message.error('请先在「设置」中填写服务端地址')
+      return
+    }
+    setUploadingId(row.examId)
+    try {
+      const result = await uploadMaterial({
+        examId: row.examId,
+        zipPath: row.zipPath,
+        server: settings.server.trim(),
+        lang: row.lang || 'de',
+        level: row.level || 'A1',
+        overwrite: true,
+        python: settings.python.trim(),
+      })
+      message.success(
+        result.response?.job_id
+          ? `上传成功：${result.response.job_id}`
+          : `上传成功：${row.examId}`,
+      )
+    } catch (error) {
+      message.error(
+        '上传失败：' + (error instanceof Error ? error.message : String(error)),
+      )
+    } finally {
+      setUploadingId(null)
+      void load(false)
+    }
+  }
 
   const columns: ColumnsType<MaterialRecord> = [
     {
@@ -135,6 +180,28 @@ export default function MaterialsPage() {
         return row.stageMessage || '-'
       },
     },
+    {
+      title: '操作',
+      width: 96,
+      fixed: 'right',
+      render: (_, row) => {
+        if (!row.zipPath) return '-'
+        if (row.status === 'uploaded') {
+          return <Typography.Text type="secondary">已上传</Typography.Text>
+        }
+        return (
+          <Button
+            size="small"
+            icon={<CloudUploadOutlined />}
+            loading={uploadingId === row.examId}
+            disabled={row.status === 'parsing' || uploadingId !== null}
+            onClick={() => void handleUpload(row)}
+          >
+            上传
+          </Button>
+        )
+      },
+    },
   ]
 
   return (
@@ -156,7 +223,7 @@ export default function MaterialsPage() {
           loading={loading}
           columns={columns}
           dataSource={rows}
-          scroll={{ x: 1500 }}
+          scroll={{ x: 1600 }}
           pagination={{ pageSize: 20, showSizeChanger: false }}
         />
       </Card>

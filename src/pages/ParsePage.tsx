@@ -92,7 +92,12 @@ export default function ParsePage() {
       .then((root) => {
         setSettings((prev) => {
           const next = { ...prev, builderRoot: root }
-          saveSettings(next)
+          // localStorage 不可用（如 WebKit 目录无权限）时也要能继续解析
+          try {
+            saveSettings(next)
+          } catch {
+            // 忽略持久化失败，仅影响下次启动的默认值
+          }
           return next
         })
       })

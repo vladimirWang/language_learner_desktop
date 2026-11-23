@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import uuid
+import zipfile
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -222,10 +223,58 @@ def upload(server: str, zip_path: Path, lang: str, level: str, overwrite: bool) 
     return body if isinstance(body, dict) else {"raw": raw}
 
 
+def upload_only(args: argparse.Namespace) -> int:
+    """只把已有 zip 上传到服务端（用于补传解析成功但上传失败的素材）。"""
+    if not args.zip:
+        emit_result({"ok": False, "error": "上传模式需要 --zip"})
+        return 2
+    if not args.exam_id:
+        emit_result({"ok": False, "error": "上传模式需要 --exam-id"})
+        return 2
+    zip_path = Path(args.zip).expanduser()
+    if not zip_path.is_file():
+        emit_result({"ok": False, "error": f"zip 不存在：{zip_path}"})
+        return 2
+
+    # 从 zip 里的 manifest 读标题/题目数，补全本地列表信息
+    title = None
+    question_count = None
+    duration = None
+    try:
+        with zipfile.ZipFile(zip_path) as archive:
+            manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
+        title = manifest.get("title")
+        question_count = len(manifest.get("questions") or [])
+        duration = manifest.get("duration")
+    except (KeyError, json.JSONDecodeError, zipfile.BadZipFile):
+        pass
+
+    size = zip_path.stat().st_size
+    print(f"[desktop] 上传已有素材 {zip_path}（{size / 1024 / 1024:.1f} MB）→ {args.server}", flush=True)
+    print(
+        "STAGE "
+        + json.dumps(
+            {"stage": "uploading", "message": f"上传素材 {size / 1024 / 1024:.1f} MB"},
+            ensure_ascii=False,
+        ),
+        flush=True,
+    )
+    result = upload(args.server, zip_path, args.lang, args.level, args.overwrite)
+    emit_result({
+        "ok": True,
+        "response": result,
+        "zip_path": str(zip_path),
+        "title": title,
+        "question_count": question_count,
+        "duration": duration,
+    })
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="parse_and_upload")
-    parser.add_argument("--url", required=True)
-    parser.add_argument("--exam-id", required=True)
+    parser.add_argument("--url", default="")
+    parser.add_argument("--exam-id", default="")
     parser.add_argument("--lang", default="de")
     parser.add_argument("--model", default="small")
     parser.add_argument("--profile", default="")
@@ -233,12 +282,26 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--answers", default="")
     parser.add_argument("--cookies", default="")
     parser.add_argument("--server", default="http://127.0.0.1:8080")
-    parser.add_argument("--builder-root", required=True)
+    parser.add_argument("--builder-root", default="")
     parser.add_argument("--work-dir", default="")
     parser.add_argument("--python", default="")
     parser.add_argument("--download-dir", default="")
     parser.add_argument("--overwrite", action="store_true")
+    # 已有 zip 的补传模式，只依赖标准库
+    parser.add_argument("--upload-only", action="store_true")
+    parser.add_argument("--zip", default="")
     args = parser.parse_args(argv)
+
+    if args.upload_only:
+        try:
+            return upload_only(args)
+        except Exception as exc:  # noqa: BLE001
+            emit_result({"ok": False, "error": str(exc)})
+            return 1
+
+    if not args.url or not args.exam_id or not args.builder_root:
+        emit_result({"ok": False, "error": "解析模式需要 --url、--exam-id、--builder-root"})
+        return 2
 
     builder_root = Path(args.builder_root).expanduser().resolve()
     if not (builder_root / "builder" / "listen.py").is_file():

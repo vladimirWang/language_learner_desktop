@@ -58,7 +58,29 @@ export interface UploadedMaterial {
   manifest: string
 }
 
+/** 手动补传一个已解析好的 zip。 */
+export interface UploadMaterialRequest {
+  examId: string
+  zipPath: string
+  server: string
+  lang: string
+  level: string
+  overwrite: boolean
+  python: string
+}
+
+export interface UploadMaterialResult {
+  ok: boolean
+  response?: UploadedMaterial
+  zip_path?: string
+  title?: string | null
+  question_count?: number | null
+}
+
 export const startParse = (req: ParseRequest) => invoke<void>('start_parse', { req })
+
+export const uploadMaterial = (req: UploadMaterialRequest) =>
+  invoke<UploadMaterialResult>('upload_material', { req })
 
 export const getDefaultBuilderRoot = () => invoke<string>('default_builder_root')
 

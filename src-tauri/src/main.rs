@@ -29,6 +29,19 @@ struct ParseRequest {
     python: String,
 }
 
+/// 手动补传已有解析产物（解析成功但上传失败的记录）。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UploadRequest {
+    exam_id: String,
+    zip_path: String,
+    server: String,
+    lang: String,
+    level: String,
+    overwrite: bool,
+    python: String,
+}
+
 /// 已解析听力的本地记录（SQLite 一行）。
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -102,8 +115,14 @@ fn record_start(app: &tauri::AppHandle, req: &ParseRequest) -> Result<(), String
              status = 'parsing',
              stage = 'start',
              stage_message = '已提交解析',
-             error = NULL,
-             updated_at = datetime('now','localtime')",
++             title = NULL,
++             server_job_id = NULL,
++             zip_path = NULL,
++             question_count = NULL,
++             file_count = NULL,
++             size_bytes = NULL,
+              error = NULL,
+              updated_at = datetime('now','localtime')",
         params![&req.exam_id, &req.lang, &req.level, &req.url],
     )
     .map_err(|err| format!("写入本地任务记录失败：{err}"))?;
@@ -119,6 +138,18 @@ fn record_stage(app: &tauri::AppHandle, exam_id: &str, stage: &str, message: &st
                     updated_at = datetime('now','localtime')
               WHERE exam_id = ?1",
             params![exam_id, stage, message],
+        );
+    }
+}
+
+fn record_upload_started(app: &tauri::AppHandle, exam_id: &str) {
+    if let Ok(conn) = open_db(app) {
+        let _ = conn.execute(
+            "UPDATE listening_materials
+                SET status = 'uploading', stage = 'uploading', stage_message = '上传中',
+                    error = NULL, updated_at = datetime('now','localtime')
+              WHERE exam_id = ?1",
+            params![exam_id],
         );
     }
 }
@@ -265,7 +296,10 @@ fn start_parse(app: tauri::AppHandle, req: ParseRequest) -> Result<(), String> {
     }
 
     // 先落一条本地记录，列表页立刻能看到“解析中”。
-    record_start(&app, &req)?;
+    // 本地库只是辅助信息，写入失败不应阻断解析。
+    if let Err(err) = record_start(&app, &req) {
+        eprintln!("记录解析任务失败（不影响解析）：{err}");
+    }
 
     let download_dir = downloads_dir(&app);
     let _ = std::fs::create_dir_all(&download_dir);
@@ -412,10 +446,115 @@ fn start_parse(app: tauri::AppHandle, req: ParseRequest) -> Result<(), String> {
     Ok(())
 }
 
+/// 把本地已解析的 zip 补传到服务端。
+///
+/// 只走侧车的 `--upload-only` 模式（仅依赖 Python 标准库），
+/// 不重新下载/转写；成功后刷新本地记录为“已上传”。
+fn do_upload(app: tauri::AppHandle, req: UploadRequest) -> Result<Value, String> {
+    if req.exam_id.trim().is_empty() {
+        return Err("exam_id 不能为空".into());
+    }
+    if req.server.trim().is_empty() {
+        return Err("请先在设置中填写服务端地址".into());
+    }
+    let zip_path = PathBuf::from(req.zip_path.trim());
+    if !zip_path.is_file() {
+        return Err(format!("zip 不存在：{}", zip_path.display()));
+    }
+    let sidecar = sidecar_path(&app);
+    if !sidecar.is_file() {
+        return Err(format!("sidecar 不存在：{}", sidecar.display()));
+    }
+
+    record_upload_started(&app, &req.exam_id);
+
+    let python = if req.python.trim().is_empty() {
+        "python3".to_string()
+    } else {
+        req.python.trim().to_string()
+    };
+    let mut command = Command::new(&python);
+    command
+        .arg(&sidecar)
+        .arg("--upload-only")
+        .arg("--zip")
+        .arg(&zip_path)
+        .arg("--exam-id")
+        .arg(&req.exam_id)
+        .arg("--lang")
+        .arg(&req.lang)
+        .arg("--level")
+        .arg(&req.level)
+        .arg("--server")
+        .arg(&req.server)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if req.overwrite {
+        command.arg("--overwrite");
+    }
+
+    let output = match command.output() {
+        Ok(output) => output,
+        Err(err) => {
+            let message = format!("启动 Python 失败：{err}");
+            record_failure(&app, &req.exam_id, &message);
+            return Err(message);
+        }
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    let mut result: Option<Value> = None;
+    for line in stdout.lines() {
+        if let Some(raw) = line.strip_prefix("RESULT ") {
+            result = serde_json::from_str::<Value>(raw).ok();
+        }
+    }
+
+    match result {
+        Some(value) if value.get("ok").and_then(Value::as_bool).unwrap_or(false) => {
+            record_success(&app, &req.exam_id, &value);
+            Ok(value)
+        }
+        Some(value) => {
+            let message = value
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("上传失败")
+                .to_string();
+            record_failure(&app, &req.exam_id, &message);
+            Err(message)
+        }
+        None => {
+            let detail = stderr.lines().last().unwrap_or("").trim();
+            let message = if output.status.success() {
+                "上传结束但没有返回结果".to_string()
+            } else {
+                format!(
+                    "上传进程退出码 {}：{}",
+                    output.status.code().unwrap_or(-1),
+                    detail
+                )
+            };
+            record_failure(&app, &req.exam_id, &message);
+            Err(message)
+        }
+    }
+}
+
+#[tauri::command]
+async fn upload_material(app: tauri::AppHandle, req: UploadRequest) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || do_upload(app, req))
+        .await
+        .map_err(|err| format!("上传线程异常：{err}"))?
+}
+
 fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             start_parse,
+            upload_material,
             default_builder_root,
             list_materials
         ])
