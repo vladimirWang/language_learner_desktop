@@ -1,0 +1,16 @@
+[package]
+name = "language-learner-desktop"
+version = "0.1.0"
+description = "Listen material workbench (faster-whisper sidecar + backend upload)"
+authors = ["you"]
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# 本地记录已解析/已上传的听力素材；bundled 便于跨平台打包。
+rusqlite = { version = "0.32", features = ["bundled"] }

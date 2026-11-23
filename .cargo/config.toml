@@ -1,0 +1,6 @@
+# 本机 ~/.cargo 配置的 ustc 索引当前返回 404，项目内固定使用 rsproxy。
+[source.crates-io]
+replace-with = "rsproxy"
+
+[source.rsproxy]
+registry = "sparse+https://rsproxy.cn/index/"
