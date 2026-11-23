@@ -154,12 +154,39 @@ def run_builder(args: argparse.Namespace, builder_root: Path, work_dir: Path) ->
     return proc.wait()
 
 
+# 上传包瘦身：source/ 是原始整段视频/音频（约占包体 80%），
+# 管理端播放使用的是 audio/qNN.m4a 与 images/，因此打包时跳过，
+# 并把 manifest 的 media_file 置空，避免后端校验"媒体文件必须存在"。
+SLIM_SKIP_PREFIXES = ("source/",)
+
+
+def _slim_manifest_bytes(manifest_path: Path) -> bytes:
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return manifest_path.read_bytes()
+    if isinstance(payload, dict):
+        payload["media_file"] = ""
+        payload["media_has_video"] = False
+    return json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+
 def build_zip(exam_dir: Path, zip_path: Path) -> None:
+    """打包素材：跳过 source/ 原始素材，包体可降约 80%，显著加快远端上传。"""
     zip_path.parent.mkdir(parents=True, exist_ok=True)
-    base = zip_path.with_suffix("")
-    archive = shutil.make_archive(str(base), "zip", root_dir=str(exam_dir))
-    if Path(archive) != zip_path:
-        Path(archive).replace(zip_path)
+    tmp_path = zip_path.with_name(zip_path.name + ".tmp")
+    with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
+        for path in sorted(exam_dir.rglob("*")):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(exam_dir).as_posix()
+            if any(rel.startswith(prefix) for prefix in SLIM_SKIP_PREFIXES):
+                continue
+            if rel == "manifest.json":
+                archive.writestr("manifest.json", _slim_manifest_bytes(path))
+                continue
+            archive.write(path, rel)
+    tmp_path.replace(zip_path)
 
 
 def upload(server: str, zip_path: Path, lang: str, level: str, overwrite: bool) -> dict:
