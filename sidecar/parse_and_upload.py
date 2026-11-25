@@ -93,7 +93,15 @@ def resolve_runner(args: argparse.Namespace) -> tuple[list[str], Path | None]:
 
 
 def run_builder(args: argparse.Namespace, builder_root: Path, work_dir: Path) -> int:
-    cmd, venv_bin = resolve_runner(args)
+    venv_bin = None
+    if args.parser_bin:
+        parser = Path(args.parser_bin).expanduser().resolve()
+        if not parser.is_file():
+            raise RuntimeError(f"listen-parser 不存在：{parser}")
+        print(f"[desktop] parser={parser}（独立二进制）", flush=True)
+        cmd = [str(parser)]
+    else:
+        cmd, venv_bin = resolve_runner(args)
     cmd += [
         "--url", args.url,
         "--exam-id", args.exam_id,
@@ -312,6 +320,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--builder-root", default="")
     parser.add_argument("--work-dir", default="")
     parser.add_argument("--python", default="")
+    parser.add_argument("--parser-bin", default="", help="独立 listen-parser 二进制；提供后不再依赖 Python")
     parser.add_argument("--download-dir", default="")
     parser.add_argument("--overwrite", action="store_true")
     # 已有 zip 的补传模式，只依赖标准库
@@ -326,12 +335,12 @@ def main(argv: list[str] | None = None) -> int:
             emit_result({"ok": False, "error": str(exc)})
             return 1
 
-    if not args.url or not args.exam_id or not args.builder_root:
-        emit_result({"ok": False, "error": "解析模式需要 --url、--exam-id、--builder-root"})
+    if not args.url or not args.exam_id or (not args.builder_root and not args.parser_bin):
+        emit_result({"ok": False, "error": "解析模式需要 --url、--exam-id，以及 --builder-root 或 --parser-bin"})
         return 2
 
-    builder_root = Path(args.builder_root).expanduser().resolve()
-    if not (builder_root / "builder" / "listen.py").is_file():
+    builder_root = Path(args.builder_root).expanduser().resolve() if args.builder_root else DESKTOP_ROOT
+    if not args.parser_bin and not (builder_root / "builder" / "listen.py").is_file():
         emit_result({"ok": False, "error": f"builder 目录无效：{builder_root}"})
         return 2
 

@@ -260,6 +260,10 @@ fn sidecar_path(app: &tauri::AppHandle) -> PathBuf {
     if let Ok(path) = std::env::var("LL_DESKTOP_SIDECAR") {
         return PathBuf::from(path);
     }
+    // 发布版优先使用 PyInstaller 打包的 parse-and-upload 二进制。
+    if let Some(binary) = bundled_binary(app, "parse-and-upload") {
+        return binary;
+    }
     if let Ok(dir) = app.path().resource_dir() {
         let bundled = dir.join("sidecar").join("parse_and_upload.py");
         if bundled.is_file() {
@@ -270,6 +274,35 @@ fn sidecar_path(app: &tauri::AppHandle) -> PathBuf {
         .join("..")
         .join("sidecar")
         .join("parse_and_upload.py")
+}
+
+/// 独立听力解析二进制；发布版由 Tauri 放在可执行文件同级，开发环境默认走 Python 源码。
+fn parser_binary(app: &tauri::AppHandle) -> Option<PathBuf> {
+    if let Ok(path) = std::env::var("LL_DESKTOP_PARSER") {
+        let path = PathBuf::from(path);
+        return path.is_file().then_some(path);
+    }
+    bundled_binary(app, "listen-parser")
+}
+
+/// 在应用可执行文件同级与资源目录中查找打包的 sidecar 二进制。
+fn bundled_binary(app: &tauri::AppHandle, name: &str) -> Option<PathBuf> {
+    let file = if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_string()
+    };
+    let mut candidates = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join(&file));
+        }
+    }
+    if let Ok(dir) = app.path().resource_dir() {
+        candidates.push(dir.join(&file));
+        candidates.push(dir.join("sidecar").join(&file));
+    }
+    candidates.into_iter().find(|path| path.is_file())
 }
 
 /// 解析产物 zip 的落盘目录：系统下载目录（macOS 为 ~/Downloads）。
@@ -303,6 +336,7 @@ fn start_parse(app: tauri::AppHandle, req: ParseRequest) -> Result<(), String> {
 
     let download_dir = downloads_dir(&app);
     let _ = std::fs::create_dir_all(&download_dir);
+    let parser = parser_binary(&app);
 
     let exam_id = req.exam_id.clone();
     thread::spawn(move || {
@@ -312,9 +346,19 @@ fn start_parse(app: tauri::AppHandle, req: ParseRequest) -> Result<(), String> {
             req.python.trim().to_string()
         };
 
-        let mut command = Command::new(&python);
+        // 发布版 sidecar 与 parser 都是独立二进制，不再需要 Python。
+        let python_sidecar = sidecar
+            .extension()
+            .map(|ext| ext == "py")
+            .unwrap_or(false);
+        let mut command = if python_sidecar {
+            let mut cmd = Command::new(&python);
+            cmd.arg(&sidecar);
+            cmd
+        } else {
+            Command::new(&sidecar)
+        };
         command
-            .arg(&sidecar)
             .arg("--url")
             .arg(&req.url)
             .arg("--exam-id")
@@ -329,15 +373,20 @@ fn start_parse(app: tauri::AppHandle, req: ParseRequest) -> Result<(), String> {
             .arg(&req.level)
             .arg("--server")
             .arg(&req.server)
-            .arg("--builder-root")
-            .arg(&req.builder_root)
-            .arg("--python")
-            .arg(&python)
             .arg("--download-dir")
             .arg(&download_dir)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        if python_sidecar {
+            command.arg("--python").arg(&python);
+        }
+        if let Some(parser) = &parser {
+            command.arg("--parser-bin").arg(parser);
+        }
+        if !req.builder_root.trim().is_empty() {
+            command.arg("--builder-root").arg(&req.builder_root);
+        }
         if !req.answers.trim().is_empty() {
             command.arg("--answers").arg(req.answers.trim());
         }
@@ -473,9 +522,18 @@ fn do_upload(app: tauri::AppHandle, req: UploadRequest) -> Result<Value, String>
     } else {
         req.python.trim().to_string()
     };
-    let mut command = Command::new(&python);
+    let python_sidecar = sidecar
+        .extension()
+        .map(|ext| ext == "py")
+        .unwrap_or(false);
+    let mut command = if python_sidecar {
+        let mut cmd = Command::new(&python);
+        cmd.arg(&sidecar);
+        cmd
+    } else {
+        Command::new(&sidecar)
+    };
     command
-        .arg(&sidecar)
         .arg("--upload-only")
         .arg("--zip")
         .arg(&zip_path)

@@ -6,3 +6,5 @@ __pycache__
 src-tauri/target
 src-tauri/gen
 .DS_Store
+src-tauri/binaries/
+src-tauri/pyinstaller-build/
